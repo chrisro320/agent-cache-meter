@@ -36,6 +36,8 @@ const LONG_WRITE_FACTOR = 1.6; // Anthropic 1h writes cost 2× input, 5m writes 
 export class Tracker {
 	history: Req[] = [];
 	totals = { saved: 0, warmCost: 0, warms: 0, misses: 0, missCost: 0 };
+	/** Lifetime the provider reported for the latest cache write (`cttl`). It wins over `requestedTier`: a proxy may keep
+	 * the entry longer than the payload asked (an OpenAI-compatible Claude proxy reports 1h writes for 5m requests). */
 	observedTier: Tier | undefined;
 	/** Tier the latest request asked for (`cache_control.ttl`); survives resets, it follows the credential. */
 	requestedTier: Tier | undefined;
@@ -58,7 +60,7 @@ export class Tracker {
 	record(kind: Req["kind"], usage: Usage, at: number, model: Model | undefined): boolean {
 		const r: Req = { at, kind, read: usage.cacheRead, write: usage.cacheWrite, uncached: usage.input, cost: usage.cost.total };
 		if (r.read + r.write + r.uncached === 0) return false;
-		const price = priceOf(model, this.requestedTier ?? this.observedTier);
+		const price = priceOf(model, this.observedTier ?? this.requestedTier);
 		if (usage.cttl?.ephemeral1h) this.observedTier = "long";
 		else if (usage.cttl?.ephemeral5m) this.observedTier = "short";
 		this.totals.saved += r.read * (price.input - price.read);
@@ -215,7 +217,7 @@ export function snapshot(t: Tracker, env: Env): Snapshot | undefined {
 	const total = last.read + last.write + last.uncached;
 	const turns = t.history.filter(r => r.kind === "turn");
 	const sent = turns.reduce((n, r) => n + r.read + r.write + r.uncached, 0);
-	const known = t.requestedTier ?? t.observedTier;
+	const known = t.observedTier ?? t.requestedTier;
 	const tier: Tier = known ?? (env.retention === "long" ? "long" : "short");
 	const declared = env.model?.promptCache?.[tier];
 	const ttlMs = (declared ?? (tier === "long" ? 3600 : 300)) * 1000;
