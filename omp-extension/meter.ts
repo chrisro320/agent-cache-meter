@@ -162,6 +162,8 @@ export interface CompactPlan {
 /** Everything the meter, the panel and Tern show; time-dependent fields are computed from `now`. */
 export interface Snapshot {
 	last: Req & { total: number; hitPct: number };
+	/** Share of all turn prompt tokens read from the cache across the whole session branch; cache refreshes excluded. */
+	avgHitPct: number | undefined;
 	/** The prefix the next request sends: the last request's prompt, or the compacted context after /compact. */
 	prefixTokens: number;
 	/** The tools and static system prompt: shared across omp sessions, so still cached when this one goes cold. */
@@ -211,6 +213,8 @@ export function snapshot(t: Tracker, env: Env): Snapshot | undefined {
 	const last = t.history.at(-1);
 	if (!last) return undefined;
 	const total = last.read + last.write + last.uncached;
+	const turns = t.history.filter(r => r.kind === "turn");
+	const sent = turns.reduce((n, r) => n + r.read + r.write + r.uncached, 0);
 	const known = t.requestedTier ?? t.observedTier;
 	const tier: Tier = known ?? (env.retention === "long" ? "long" : "short");
 	const declared = env.model?.promptCache?.[tier];
@@ -297,6 +301,7 @@ export function snapshot(t: Tracker, env: Env): Snapshot | undefined {
 	const advice = stage === "cold" ? coldAdvice : stage === "expiring" ? "send now" : "continue";
 	return {
 		last: { ...last, total, hitPct: total > 0 ? (100 * last.read) / total : 0 },
+		avgHitPct: sent > 0 ? (100 * turns.reduce((n, r) => n + r.read, 0)) / sent : undefined,
 		prefixTokens,
 		headTokens: head,
 		tier,
@@ -378,8 +383,9 @@ function compactAdvice(p: CompactPlan): Span[] {
 }
 
 /**
- * The meter above the composer: one line while warm, expiring or just compacted, two when cold. What happened is
- * on the left; the hit bar, hit rate and time (or the sizes) sit at the right end. Empty when settings hide it now.
+ * The meter above the composer: one line while warm, expiring or just compacted, two when cold. The stage (and the
+ * rebuild cost near expiry) is on the left; the last request's hit bar and rate, the session's average hit rate and
+ * the time (or the sizes) sit at the right end. Empty when settings hide it now.
  */
 export function renderMeter(s: Snapshot, env: Pick<Env, "settings" | "host">): View {
 	const tone = stageTone(s.stage);
@@ -427,21 +433,10 @@ export function renderMeter(s: Snapshot, env: Pick<Env, "settings" | "host">): V
 	}
 
 	const r = s.last;
-	const left: Span[] =
-		s.stage === "expiring"
-			? [...rebuild, ...muted(" after"), ...note]
-			: [
-					{ text: "read ", tone: "success" },
-					{ text: tokens(r.read) },
-					...muted(" · "),
-					{ text: "write ", tone: "accent" },
-					{ text: tokens(r.write) },
-					...muted(" · "),
-					{ text: "uncached ", tone: "warning" },
-					{ text: tokens(r.uncached) },
-				];
-	const hit: Span[] = [{ text: `${r.hitPct.toFixed(1)}%`, tone: "success" }, ...muted(" | "), { text: clock(s.leftMs / 1000), tone }];
-	return { tone, blocks: [{ kind: "bar", left: [...title, left], right: [muted("hit rate"), splitBar(r), hit], keepRight: true }] };
+	const left: Item[] = s.stage === "expiring" ? [...title, [...rebuild, ...muted(" after"), ...note]] : title;
+	const avg: Span[] = s.avgHitPct === undefined ? [] : [...muted(" · avg "), { text: `${s.avgHitPct.toFixed(1)}%`, tone: "success" }];
+	const hit: Span[] = [{ text: `${r.hitPct.toFixed(1)}%`, tone: "success" }, ...avg, ...muted(" | "), { text: clock(s.leftMs / 1000), tone }];
+	return { tone, blocks: [{ kind: "bar", left, right: [muted("hit rate"), splitBar(r), hit], keepRight: true }] };
 }
 
 /** The `/cache` panel: a title bar, the details behind an expiring, cold or compacted meter, session totals, the latest requests. */
