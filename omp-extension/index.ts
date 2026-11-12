@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import type { CompactionEntry, ExtensionAPI, ExtensionContext, ExtensionUI, Model, Tui } from "./host";
-import { type Env, type HostProfile, type Retention, renderMeter, renderPanel, requestedTier, snapshot, Tracker, type WarmingMode } from "./meter";
+import { type Env, type HostProfile, modelKey, type Retention, renderMeter, renderPanel, requestedTier, snapshot, Tracker, type WarmingMode } from "./meter";
 import { toAnsi, toTsp, type View } from "./view";
 import { DEFAULTS, loadSettings, METER_SHOW, type MeterSettings, saveSettings, TERN_PUBLISH } from "./settings";
 import { PANE_FILE, paneState, TERN_PANE, writePaneState } from "./tern";
@@ -75,8 +75,8 @@ export default function cacheMeter(pi: ExtensionAPI): void {
 		cwd = ctx.cwd;
 		for (const e of ctx.sessionManager.getBranch()) {
 			const at = Date.parse(e.timestamp);
-			if (e.type === "message" && e.message.role === "assistant" && e.message.usage) tracker.record("turn", e.message.usage, at, model);
-			else if (e.type === "model_usage" && e.purpose.startsWith("cache-warm")) tracker.record("warm", e.usage, at, model);
+			if (e.type === "message" && e.message.role === "assistant" && e.message.usage) tracker.record("turn", e.message.usage, at, model, modelKey(e.message.provider, e.message.model));
+			else if (e.type === "model_usage" && e.purpose.startsWith("cache-warm")) tracker.record("warm", e.usage, at, model, modelKey(e.provider, e.model));
 			else if (e.type === "compaction") tracker.compacted = compaction(e, at);
 		}
 		published = "";
@@ -172,7 +172,7 @@ export default function cacheMeter(pi: ExtensionAPI): void {
 	pi.on("message_end", (e, ctx) => {
 		if (e.message.role !== "assistant" || !e.message.usage) return;
 		model = ctx.model ?? model;
-		if (tracker.record("turn", e.message.usage, Date.now(), model)) refresh();
+		if (tracker.record("turn", e.message.usage, Date.now(), model, modelKey(e.message.provider, e.message.model))) refresh();
 	});
 
 	pi.on("before_provider_request", e => {
@@ -186,7 +186,7 @@ export default function cacheMeter(pi: ExtensionAPI): void {
 		return undefined; // observe only; omp's own decision stands
 	});
 	pi.on("cache_warming_end", e => {
-		if (e.usage) tracker.record("warm", e.usage, Date.now(), model);
+		if (e.usage) tracker.record("warm", e.usage, Date.now(), model, modelKey(e.provider, e.model));
 		if (e.warmingStopReason) tracker.stopped = { at: Date.now(), reason: e.warmingStopReason };
 		refresh();
 	});

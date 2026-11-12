@@ -36,9 +36,12 @@ const LONG_WRITE_FACTOR = 1.6; // Anthropic 1h writes cost 2× input, 5m writes 
 export class Tracker {
 	history: Req[] = [];
 	totals = { saved: 0, warmCost: 0, warms: 0, misses: 0, missCost: 0 };
-	/** Lifetime the provider reported for the latest cache write (`cttl`). It wins over `requestedTier`: a proxy may keep
-	 * the entry longer than the payload asked (an OpenAI-compatible Claude proxy reports 1h writes for 5m requests). */
+	/** Lifetime the provider reported for the latest cache write (`cttl`), by the model `observedFor` names. For that
+	 * model it wins over `requestedTier`: a proxy may keep the entry longer than the payload asked (an OpenAI-compatible
+	 * Claude proxy reports 1h writes for 5m requests). Another model's observation never applies. */
 	observedTier: Tier | undefined;
+	/** `provider/id` of the model whose write set `observedTier`; undefined applies it to any model. */
+	observedFor: string | undefined;
 	/** Tier the latest request asked for (`cache_control.ttl`); survives resets, it follows the credential. */
 	requestedTier: Tier | undefined;
 	/** Last warming decision or stop omp reported, with when it happened. */
@@ -51,18 +54,28 @@ export class Tracker {
 		this.history = [];
 		this.totals = { saved: 0, warmCost: 0, warms: 0, misses: 0, missCost: 0 };
 		this.observedTier = undefined;
+		this.observedFor = undefined;
 		this.decision = undefined;
 		this.stopped = undefined;
 		this.compacted = undefined;
 	}
 
-	/** Adds one request; returns false when it carried no prompt tokens (errors, aborts). */
-	record(kind: Req["kind"], usage: Usage, at: number, model: Model | undefined): boolean {
+	/** The tier of `key`'s cache: what its provider last reported, else what the latest request asked for. */
+	tierFor(key: string | undefined): Tier | undefined {
+		const observed = this.observedFor === undefined || this.observedFor === key ? this.observedTier : undefined;
+		return observed ?? this.requestedTier;
+	}
+
+	/** Adds one request (`source`: the `provider/id` that served it); returns false when it carried no prompt tokens. */
+	record(kind: Req["kind"], usage: Usage, at: number, model: Model | undefined, source = modelKey(model?.provider, model?.id)): boolean {
 		const r: Req = { at, kind, read: usage.cacheRead, write: usage.cacheWrite, uncached: usage.input, cost: usage.cost.total };
 		if (r.read + r.write + r.uncached === 0) return false;
-		const price = priceOf(model, this.observedTier ?? this.requestedTier);
-		if (usage.cttl?.ephemeral1h) this.observedTier = "long";
-		else if (usage.cttl?.ephemeral5m) this.observedTier = "short";
+		const price = priceOf(model, this.tierFor(source));
+		const observed: Tier | undefined = usage.cttl?.ephemeral1h ? "long" : usage.cttl?.ephemeral5m ? "short" : undefined;
+		if (observed) {
+			this.observedTier = observed;
+			this.observedFor = source;
+		}
 		this.totals.saved += r.read * (price.input - price.read);
 		if (kind === "warm") {
 			this.totals.warms++;
@@ -78,6 +91,11 @@ export class Tracker {
 		this.history.push(r);
 		return true;
 	}
+}
+
+/** `provider/id`: the model a cache-tier observation belongs to. */
+export function modelKey(provider: string | undefined, id: string | undefined): string | undefined {
+	return provider && id ? `${provider}/${id}` : undefined;
 }
 
 /**
@@ -217,7 +235,7 @@ export function snapshot(t: Tracker, env: Env): Snapshot | undefined {
 	const total = last.read + last.write + last.uncached;
 	const turns = t.history.filter(r => r.kind === "turn");
 	const sent = turns.reduce((n, r) => n + r.read + r.write + r.uncached, 0);
-	const known = t.observedTier ?? t.requestedTier;
+	const known = t.tierFor(modelKey(env.model?.provider, env.model?.id));
 	const tier: Tier = known ?? (env.retention === "long" ? "long" : "short");
 	const declared = env.model?.promptCache?.[tier];
 	const ttlMs = (declared ?? (tier === "long" ? 3600 : 300)) * 1000;
